@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolvePnpmRunner } from "./pnpm-runner.mjs";
 
 const nodeBin = process.execPath;
 const WINDOWS_BUILD_MAX_OLD_SPACE_MB = 4096;
+const CONTROL_UI_DIST_DIR = path.join("dist", "control-ui");
+const CONTROL_UI_INDEX_PATH = path.join(CONTROL_UI_DIST_DIR, "index.html");
 export const BUILD_ALL_STEPS = [
   { label: "canvas:a2ui:bundle", kind: "pnpm", pnpmArgs: ["canvas:a2ui:bundle"] },
   { label: "tsdown", kind: "node", args: ["scripts/tsdown-build.mjs"] },
@@ -81,6 +86,48 @@ export const BUILD_ALL_PROFILES = {
   ],
 };
 
+// `pnpm build` intentionally does not generate Control UI assets, but it should
+// not discard a bundle that was already prepared with `pnpm ui:build`.
+export function createBuildAllControlUiSnapshot(params = {}) {
+  const cwd = params.cwd ?? process.cwd();
+  const fsImpl = params.fs ?? fs;
+  const tmpdir = params.tmpdir ?? os.tmpdir();
+  const controlUiDir = path.join(cwd, CONTROL_UI_DIST_DIR);
+  const controlUiIndexPath = path.join(cwd, CONTROL_UI_INDEX_PATH);
+  if (!fsImpl.existsSync(controlUiIndexPath)) {
+    return null;
+  }
+
+  const backupRoot = fsImpl.mkdtempSync(path.join(tmpdir, "openclaw-control-ui-build-"));
+  const backupDir = path.join(backupRoot, "control-ui");
+  fsImpl.cpSync(controlUiDir, backupDir, { recursive: true });
+  return {
+    backupRoot,
+    backupDir,
+    controlUiDir,
+    controlUiIndexPath,
+  };
+}
+
+export function restoreBuildAllControlUiSnapshot(snapshot, params = {}) {
+  if (!snapshot) {
+    return false;
+  }
+
+  const fsImpl = params.fs ?? fs;
+  try {
+    if (fsImpl.existsSync(snapshot.controlUiIndexPath)) {
+      return false;
+    }
+    fsImpl.rmSync(snapshot.controlUiDir, { recursive: true, force: true });
+    fsImpl.mkdirSync(path.dirname(snapshot.controlUiDir), { recursive: true });
+    fsImpl.cpSync(snapshot.backupDir, snapshot.controlUiDir, { recursive: true });
+    return true;
+  } finally {
+    fsImpl.rmSync(snapshot.backupRoot, { recursive: true, force: true });
+  }
+}
+
 export function resolveBuildAllSteps(profile = "full") {
   const labels = BUILD_ALL_PROFILES[profile];
   if (!labels) {
@@ -152,16 +199,27 @@ function isMainModule() {
 
 if (isMainModule()) {
   const profile = process.argv[2] ?? "full";
-  for (const step of resolveBuildAllSteps(profile)) {
-    console.error(`[build-all] ${step.label}`);
-    const invocation = resolveBuildAllStep(step);
-    const result = spawnSync(invocation.command, invocation.args, invocation.options);
-    if (typeof result.status === "number") {
-      if (result.status !== 0) {
-        process.exit(result.status);
+  const controlUiSnapshot = createBuildAllControlUiSnapshot();
+  let exitCode = 0;
+
+  try {
+    for (const step of resolveBuildAllSteps(profile)) {
+      console.error(`[build-all] ${step.label}`);
+      const invocation = resolveBuildAllStep(step);
+      const result = spawnSync(invocation.command, invocation.args, invocation.options);
+      if (typeof result.status === "number") {
+        if (result.status !== 0) {
+          exitCode = result.status;
+          break;
+        }
+        continue;
       }
-      continue;
+      exitCode = 1;
+      break;
     }
-    process.exit(1);
+  } finally {
+    restoreBuildAllControlUiSnapshot(controlUiSnapshot);
   }
+
+  process.exit(exitCode);
 }

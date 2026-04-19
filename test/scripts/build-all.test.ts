@@ -1,10 +1,17 @@
+import fsPromises from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BUILD_ALL_PROFILES,
   BUILD_ALL_STEPS,
+  createBuildAllControlUiSnapshot,
   resolveBuildAllStep,
   resolveBuildAllSteps,
+  restoreBuildAllControlUiSnapshot,
 } from "../../scripts/build-all.mjs";
+import { createScriptTestHarness } from "./test-helpers.ts";
+
+const { createTempDir } = createScriptTestHarness();
 
 describe("resolveBuildAllStep", () => {
   it("routes pnpm steps through the npm_execpath pnpm runner on Windows", () => {
@@ -100,5 +107,28 @@ describe("resolveBuildAllSteps", () => {
 
   it("rejects unknown build profiles", () => {
     expect(() => resolveBuildAllSteps("wat")).toThrow("Unknown build profile: wat");
+  });
+});
+
+describe("control-ui preservation", () => {
+  it("restores a prebuilt control-ui bundle when build cleanup removes it", async () => {
+    const rootDir = createTempDir("openclaw-build-all-");
+    const controlUiDir = path.join(rootDir, "dist", "control-ui");
+    await fsPromises.mkdir(path.join(controlUiDir, "assets"), { recursive: true });
+    await fsPromises.writeFile(path.join(controlUiDir, "index.html"), "<html>ui</html>\n", "utf8");
+    await fsPromises.writeFile(path.join(controlUiDir, "assets", "index.js"), "asset\n", "utf8");
+
+    const snapshot = createBuildAllControlUiSnapshot({ cwd: rootDir });
+
+    expect(snapshot).toBeTruthy();
+    await fsPromises.rm(controlUiDir, { recursive: true, force: true });
+
+    expect(restoreBuildAllControlUiSnapshot(snapshot)).toBe(true);
+    await expect(fsPromises.readFile(path.join(controlUiDir, "index.html"), "utf8")).resolves.toBe(
+      "<html>ui</html>\n",
+    );
+    await expect(
+      fsPromises.readFile(path.join(controlUiDir, "assets", "index.js"), "utf8"),
+    ).resolves.toBe("asset\n");
   });
 });
